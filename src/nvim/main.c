@@ -27,7 +27,6 @@
 #include "nvim/highlight.h"
 #include "nvim/iconv.h"
 #include "nvim/if_cscope.h"
-#include "nvim/lua/executor.h"
 #ifdef HAVE_LOCALE_H
 # include <locale.h>
 #endif
@@ -130,6 +129,8 @@ typedef struct {
 #endif
 
 Loop main_loop;
+
+int wfd; //ipython3 parent process writer
 
 static char *argv0 = NULL;
 
@@ -247,6 +248,50 @@ int main(int argc, char **argv)
   }
 #endif
 
+  // activate ipython3 before executing neovim
+  char * exe = "ipython3";
+  char * argw[] = { exe, 0 };
+
+  int child_stdin[2];                   /* parent -> child stdin */
+  if (pipe(child_stdin) == -1) {
+    perror("pipe"); exit(1);
+  }
+  pid_t pid = fork();
+  if (pid == 0) {
+    /* 子 */
+    /* 子は書かない(読むだけ)ので閉じる */
+    close(child_stdin[1]);
+    int rfd = child_stdin[0];
+    if (rfd != 0) {
+      if (dup2(rfd, 0) == -1) {
+        perror("dup2"); exit(1);
+      }
+      close(rfd);
+    }
+
+    /* stdoutをファイルに変更 */
+    int fdfile;
+
+    fdfile = open("/tmp/ipython_output_tmp", O_WRONLY | O_CREAT, 0666);
+    if(fdfile == -1) {
+      perror("open fdfile");
+      exit(1);
+    }
+    dup2(fdfile, 1);
+    execvp(exe, argw);
+    perror("execv"); exit(1);
+  } else {
+    /* 親 */
+    /* 親は読まない(書くだけ)ので閉じる */
+    close(child_stdin[0]);
+    wfd = child_stdin[1];
+    former_main(argc, argv);
+  }
+  return 0;
+}
+
+int former_main(int argc, char **argv)
+{
   argv0 = argv[0];
 
   char_u *fname = NULL;   // file name from command line
@@ -958,7 +1003,6 @@ static void command_line_scan(mparm_T *parmp)
         case 'r':    // "-r" recovery mode
         case 'L': {  // "-L" recovery mode
           recoverymode = 1;
-          headless_mode = true;
           break;
         }
         case 's': {
@@ -1462,13 +1506,12 @@ static void create_windows(mparm_T *parmp)
   } else
     parmp->window_count = 1;
 
-  if (recoverymode) {                   // do recover
-    msg_scroll = true;                  // scroll message up
-    ml_recover(true);
-    if (curbuf->b_ml.ml_mfp == NULL) {   // failed
+  if (recoverymode) {                   /* do recover */
+    msg_scroll = TRUE;                  /* scroll message up */
+    ml_recover();
+    if (curbuf->b_ml.ml_mfp == NULL)     /* failed */
       getout(1);
-    }
-    do_modelines(0);                    // do modelines
+    do_modelines(0);                    /* do modelines */
   } else {
     // Open a buffer for windows that don't have one yet.
     // Commands in the vimrc might have loaded a file or split the window.
@@ -1516,7 +1559,7 @@ static void create_windows(mparm_T *parmp)
           /* We can't close the window, it would disturb what
            * happens next.  Clear the file name and set the arg
            * index to -1 to delete it later. */
-          setfname(curbuf, NULL, NULL, false);
+          setfname(curbuf, NULL, NULL, FALSE);
           curwin->w_arg_idx = -1;
           swap_exists_action = SEA_NONE;
         } else
@@ -1781,8 +1824,7 @@ static bool do_user_initialization(void)
   if (do_source(user_vimrc, true, DOSO_VIMRC) != FAIL) {
     do_exrc = p_exrc;
     if (do_exrc) {
-      do_exrc = (path_full_compare((char_u *)VIMRC_FILE, user_vimrc,
-                                   false, true)
+      do_exrc = (path_full_compare((char_u *)VIMRC_FILE, user_vimrc, false)
                  != kEqualFiles);
     }
     xfree(user_vimrc);
@@ -1809,7 +1851,7 @@ static bool do_user_initialization(void)
         do_exrc = p_exrc;
         if (do_exrc) {
           do_exrc = (path_full_compare((char_u *)VIMRC_FILE, (char_u *)vimrc,
-                                       false, true) != kEqualFiles);
+                                      false) != kEqualFiles);
         }
         xfree(vimrc);
         xfree(config_dirs);
